@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Video Collection — Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root{color-scheme:dark;--bg:#101014;--panel:#1b1b22;--gold:#e7bd64;--muted:#aaa}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#fff;font:15px system-ui,Arial,sans-serif}
+main{max-width:900px;margin:30px auto;padding:16px}.panel{background:var(--panel);border:1px solid #39343a;border-radius:15px;padding:20px;margin:14px 0}
+h1{color:var(--gold);font-size:24px;margin:0 0 8px}h2{font-size:18px;margin:0 0 12px}
+input,button{font:inherit;border-radius:9px;padding:12px;border:1px solid #555;background:#111;color:#fff;width:100%;margin:6px 0}
+button{background:var(--gold);color:#17120a;border:0;font-weight:700;cursor:pointer}
+button.secondary{background:#38343a;color:#fff}button.reject{background:#8e3434;color:#fff}
+.small{color:var(--muted);font-size:13px}.hidden{display:none}.item{border-top:1px solid #444;padding:16px 0}.meta{color:#ddd;line-height:1.7}.actions{display:flex;gap:8px}.actions button{flex:1}.status{font-weight:700;color:var(--gold)}img.proof{display:block;max-width:100%;max-height:420px;border-radius:10px;margin:10px 0;border:1px solid #555}
+</style>
+</head>
+<body>
+<main>
+  <h1>VIDEO COLLECTION — ADMIN</h1>
+  <p class="small">Sign in with your admin account to review payment requests. Approve only after checking the actual UPI/bank credit.</p>
+  <section id="login" class="panel">
+    <h2>Admin Login</h2>
+    <input id="email" type="email" autocomplete="username" placeholder="Admin email">
+    <input id="password" type="password" autocomplete="current-password" placeholder="Password">
+    <button id="loginBtn">Login</button>
+    <p id="loginMsg" class="small" aria-live="polite"></p>
+  </section>
+  <section id="dashboard" class="hidden">
+    <div class="panel">
+      <div class="actions"><button id="refreshBtn">Refresh requests</button><button id="logoutBtn" class="secondary">Logout</button></div>
+      <p id="msg" class="small" aria-live="polite"></p>
+    </div>
+    <div class="panel"><h2>Pending requests</h2><div id="pending"></div></div>
+    <div class="panel"><h2>Reviewed requests</h2><div id="reviewed"></div></div>
+  </section>
+</main>
+<script>
+(() => {
+  const SUPABASE_URL = "https://bobiklnuhzqvykpizenf.supabase.co";
+  const SUPABASE_ANON_KEY = "sb_publishable_4A44AIVOWeXX1qh0uwjDUA_bGCD915y";
+  const BUCKET = "Payment Screenshot";
+  const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const $ = id => document.getElementById(id);
+  const say = (id, message) => { $(id).textContent = message; };
+  const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  async function showSession() {
+    const {data:{session}} = await client.auth.getSession();
+    $("login").classList.toggle("hidden", !!session);
+    $("dashboard").classList.toggle("hidden", !session);
+    if (session) await loadRequests();
+  }
+  async function signIn() {
+    say("loginMsg","Signing in…");
+    const {error} = await client.auth.signInWithPassword({email:$("email").value.trim(),password:$("password").value});
+    if (error) return say("loginMsg",error.message);
+    say("loginMsg","");
+    await showSession();
+  }
+  async function loadRequests() {
+    say("msg","Loading requests…");
+    const {data,error} = await client.from("payment_requests").select("id,customer_name,category,amount,screenshot_path,status,created_at").order("created_at",{ascending:false}).limit(100);
+    if(error){say("msg","Could not load requests: "+error.message);return;}
+    const pending = data.filter(x=>x.status==="pending");
+    const reviewed = data.filter(x=>x.status!=="pending");
+    $("pending").innerHTML = pending.length ? "" : '<p class="small">No pending requests.</p>';
+    $("reviewed").innerHTML = reviewed.length ? "" : '<p class="small">No reviewed requests.</p>';
+    for (const row of pending) await renderRow(row,"pending");
+    for (const row of reviewed) await renderRow(row,"reviewed");
+    say("msg",`${pending.length} pending · ${reviewed.length} reviewed`);
+  }
+  async function renderRow(row, target) {
+    const wrap=document.createElement("article"); wrap.className="item";
+    const date=row.created_at ? new Date(row.created_at).toLocaleString() : "Date unavailable";
+    wrap.innerHTML = `<div class="meta"><b>${escapeHtml(row.customer_name || "Customer")}</b><br>${escapeHtml(row.category)} — ₹${escapeHtml(row.amount)}<br>${escapeHtml(date)}<br>Status: <span class="status">${escapeHtml(row.status)}</span></div><div class="proof small">Loading screenshot…</div><div class="actions"></div>`;
+    $(target).appendChild(wrap);
+    if(row.screenshot_path){
+      const {data,error}=await client.storage.from(BUCKET).createSignedUrl(row.screenshot_path,300);
+      const proof=wrap.querySelector(".proof");
+      if(error) proof.textContent="Screenshot unavailable: "+error.message;
+      else { const url=data.signedUrl; proof.innerHTML=`<a href="${escapeHtml(url)}" target="_blank" rel="noopener">Open payment screenshot</a><img class="proof" src="${escapeHtml(url)}" alt="Payment screenshot">`; }
+    } else wrap.querySelector(".proof").textContent="No screenshot attached.";
+    if(row.status==="pending"){
+      const actions=wrap.querySelector(".actions");
+      const approve=document.createElement("button");approve.textContent="Approve";
+      const reject=document.createElement("button");reject.textContent="Reject";reject.className="reject";
+      approve.onclick=()=>updateStatus(row.id,"approved",approve,reject);
+      reject.onclick=()=>updateStatus(row.id,"rejected",approve,reject);
+      actions.append(approve,reject);
+    }
+  }
+  async function updateStatus(id,status,...buttons){
+    if(!confirm(`Mark this request as ${status}? Only do this after checking the actual payment.`)) return;
+    buttons.forEach(b=>b.disabled=true);
+    const {error}=await client.from("payment_requests").update({status}).eq("id",id);
+    if(error){say("msg","Update failed: "+error.message);buttons.forEach(b=>b.disabled=false);return;}
+    await loadRequests();
+  }
+  $("loginBtn").addEventListener("click",signIn);
+  $("refreshBtn").addEventListener("click",loadRequests);
+  $("logoutBtn").addEventListener("click",async()=>{await client.auth.signOut();await showSession();});
+  client.auth.onAuthStateChange(()=>{showSession();});
+  showSession();
+})();
+</script>
+</body>
+</html>
